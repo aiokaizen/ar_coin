@@ -2,17 +2,20 @@ import hashlib
 import json
 from datetime import datetime
 
-from nacl.encoding import HexEncoder
-from nacl.signing import VerifyKey
-from nacl.exceptions import BadSignatureError
+from secp256k1 import PrivateKey, PublicKey
 
 
 class Wallet:
 
-    def __init__(self, pub_key, name):
-        self.pub_key = pub_key
+    def __init__(self, name):
+        self._signing_key = PrivateKey()
+        self._private_key = self._signing_key.serialize()
+        self.pub_key = bytearray(self._signing_key.pubkey.serialize()).hex()
         self.name = name
         self.balance = 0
+    
+    def get_signing_key(self):
+        return self._signing_key
     
     def serialize(self):
         return {
@@ -44,32 +47,36 @@ class Transaction:
         return hashlib.sha256(json.dumps(self.serialize()).encode()).hexdigest()
 
     def sign_transaction(self, signing_key):
-
-        if self.sender != str(signing_key.verify_key.encode(encoder=HexEncoder)):
+        public_key = bytearray(signing_key.pubkey.serialize()).hex()
+        print('pub_key:', public_key)
+        print('sender:', self.sender)
+        if self.sender != public_key:
             raise Exception("You can't send money from another one's wallet!")
 
         hash = self.calculate_hash()
-        signed_hash = signing_key.sign(hash.encode(), encoder=HexEncoder)
-        self.signature = signed_hash
+        signed_hash = signing_key.ecdsa_sign(hash.encode())
+        serialized_signed_hash = signing_key.ecdsa_serialize(signed_hash)
+        hex_signed_hash = bytearray(serialized_signed_hash).hex()
+        self.signature = hex_signed_hash
     
     def transaction_is_valid(self):
         if self.sender == None:
             return True
         if self.signature is None:
             raise Exception("This transaction has not been signed.")
-        verify_key = VerifyKey(self.sender.encode(), encoder=HexEncoder)
-        signature_bytes = HexEncoder.decode(self.signature.signature)
-        try:
-            decoded_hash = verify_key.verify(
-                self.signature.message,
-                signature_bytes,
-                encoder=HexEncoder
-            )
-            if self.calculate_hash() == decoded_hash:
-                return True
-            return False
-        except BadSignatureError:
-            return False
+        
+        # Get public_key
+        public_key_bytes = bytes(bytearray.fromhex(self.sender))
+        public_key = PublicKey(public_key_bytes, raw=True)
+
+        # Get Signature
+        signature_bytes = bytes(bytearray.fromhex(self.signature))
+        signature = public_key.ecdsa_deserialize(signature_bytes)
+
+        # Verify signature
+        return public_key.ecdsa_verify(
+            self.calculate_hash().encode(), signature
+        )
 
 
 class Block:
@@ -126,8 +133,8 @@ class Blockchain:
             "chain": [block.serialize() for block in self.chain]
         }
     
-    def append_transaction(self, transaction):
-        if not transaction.sender or not transaction.reciever:
+    def append_transaction(self, transaction, miner_reward=False):
+        if not miner_reward and (not transaction.sender or not transaction.reciever):
             raise Exception("Transaction must include a sender and a reciever")
         if not transaction.transaction_is_valid():
             raise Exception("Transaction is not correctly signed.")
@@ -168,16 +175,19 @@ class Blockchain:
 
         for index in range(len(self.chain) - 1, 0, -1):
 
-            if self.chain[index].hash != self.chain[index].calculate_hash():
-                print('The chain is invalid.')
+            current_block = self.chain[index]
+            previous_block = self.chain[index - 1]
+
+            if current_block.hash != current_block.calculate_hash():
+                print('The chain is not valid.')
                 return False
             
-            if not self.chain[index].has_valid_transactions():
-                print('The transactions in the blockchain are not valid!')
+            if not current_block.has_valid_transactions():
+                print('Some transactions in the blockchain are not valid!')
                 return False
 
-            if self.chain[index].previous_hash != self.chain[index - 1].hash:
-                print('The chain is invalid!')
+            if current_block.previous_hash != previous_block.hash:
+                print('The chain is not valid!')
                 return False
         
         return True
@@ -209,7 +219,7 @@ class Blockchain:
 
         # Create a new transaction to reward the miner
         reward = Transaction(None, miner, self.mining_reward)
-        self.append_transaction(reward)
+        self.append_transaction(reward, miner_reward=True)
 
         print("A new block was mined successfully.")
         return True
